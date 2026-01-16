@@ -7,6 +7,10 @@ const schema = a.schema({
     sessions: a.hasMany('ChatSession', 'userId'),
     feedback: a.hasMany('Feedback', 'userId'),
     profiles: a.hasMany('UserProfile', 'userId'),
+    appointments: a.hasMany('Appointment', 'userId'),
+    deadlines: a.hasMany('Deadline', 'userId'),
+    documents: a.hasMany('Document', 'userId'),
+    benefitsCalculations: a.hasMany('BenefitsCalculation', 'userId'),
     createdAt: a.datetime(),
     updatedAt: a.datetime(),
   })
@@ -68,11 +72,11 @@ const schema = a.schema({
     user: a.belongsTo('User', 'userId'),
     name: a.string(),
     email: a.string(),
-    postcode: a.string(),            // UK postcode for local bureau routing
-    region: a.string(),              // Region (e.g., "London", "Scotland", "Wales")
-    localBureauId: a.string(),       // Local Citizens Advice bureau ID
+    postcode: a.string(),
+    region: a.string(),
+    localBureauId: a.string(),
     notes: a.string(),
-    onboardingCompleted: a.boolean().default(false),
+    onboardingCompleted: a.boolean(),
     preferences: a.json(),
     createdAt: a.datetime(),
     updatedAt: a.datetime(),
@@ -85,32 +89,110 @@ const schema = a.schema({
   // Notes model - for saving advice case notes
   Notes: a.model({
     id: a.id().required(),
-    user_id: a.string().required(),
+    userId: a.string().required(),
     content: a.string().required(),
-    category: a.string(),            // benefits, housing, employment, consumer, debt, immigration
-    actionRequired: a.boolean().default(false),
-    deadline: a.string(),            // Important deadline date
-    resolved: a.boolean().default(false),
+    category: a.string(),
+    actionRequired: a.boolean(),
+    deadline: a.string(),
+    resolved: a.boolean(),
   })
   .authorization((allow) => [allow.authenticated()])
   .secondaryIndexes((index) => [
-    index('user_id')
+    index('userId')
   ]),
 
   // LocalBureau model - Citizens Advice bureau locations
   LocalBureau: a.model({
     id: a.id().required(),
-    name: a.string().required(),     // Bureau name
-    region: a.string().required(),   // Region coverage
-    postcodes: a.string(),           // Comma-separated postcode prefixes covered
+    name: a.string().required(),
+    region: a.string().required(),
+    postcodes: a.string(),
     address: a.string(),
     phone: a.string(),
     email: a.string(),
     openingHours: a.string(),
-    specialisms: a.string(),         // Comma-separated specialisms
-    knowledgeBaseId: a.string(),     // Bedrock KB ID for local content
+    specialisms: a.string(),
+    knowledgeBaseId: a.string(),
   })
   .authorization((allow) => [allow.authenticated().to(['read'])]),
+
+  // Appointment model - scheduled calls with advisors
+  Appointment: a.model({
+    id: a.id().required(),
+    userId: a.id().required(),
+    user: a.belongsTo('User', 'userId'),
+    bureauId: a.string(),
+    bureauName: a.string(),
+    advisorName: a.string(),
+    scheduledTime: a.datetime().required(),
+    duration: a.integer(),
+    urgencyScore: a.integer().required(),
+    category: a.string().required(),
+    caseNotes: a.string(),
+    status: a.enum(['scheduled', 'completed', 'cancelled', 'noshow']),
+    phoneNumber: a.string(),
+    createdAt: a.datetime(),
+    updatedAt: a.datetime(),
+  })
+  .authorization((allow: any) => [
+    allow.owner(),
+    allow.authenticated().to(['read']),
+  ]),
+
+  // Deadline model - track important dates
+  Deadline: a.model({
+    id: a.id().required(),
+    userId: a.id().required(),
+    user: a.belongsTo('User', 'userId'),
+    title: a.string().required(),
+    description: a.string(),
+    dueDate: a.datetime().required(),
+    category: a.string().required(),
+    priority: a.enum(['low', 'medium', 'high', 'urgent']),
+    completed: a.boolean(),
+    reminderSent: a.boolean(),
+    createdAt: a.datetime(),
+    updatedAt: a.datetime(),
+  })
+  .authorization((allow: any) => [
+    allow.owner(),
+    allow.authenticated().to(['read']),
+  ]),
+
+  // Document model - generated letters and forms
+  Document: a.model({
+    id: a.id().required(),
+    userId: a.id().required(),
+    user: a.belongsTo('User', 'userId'),
+    title: a.string().required(),
+    type: a.string().required(),
+    content: a.string().required(),
+    category: a.string(),
+    s3Key: a.string(),
+    createdAt: a.datetime(),
+    updatedAt: a.datetime(),
+  })
+  .authorization((allow: any) => [
+    allow.owner(),
+    allow.authenticated().to(['read']),
+  ]),
+
+  // BenefitsCalculation model - store calculation results
+  BenefitsCalculation: a.model({
+    id: a.id().required(),
+    userId: a.id().required(),
+    user: a.belongsTo('User', 'userId'),
+    income: a.json(),
+    expenses: a.json(),
+    circumstances: a.json(),
+    results: a.json(),
+    createdAt: a.datetime(),
+    updatedAt: a.datetime(),
+  })
+  .authorization((allow: any) => [
+    allow.owner(),
+    allow.authenticated().to(['read']),
+  ]),
 
 })
 

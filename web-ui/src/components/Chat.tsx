@@ -2,6 +2,13 @@ import { useState, useEffect, useRef } from 'react'
 import { invokeAgentCore, type ChatMessage } from '../services/awsCalls'
 import { type Session, createSession, saveMessage } from '../services/bedrockSessionService'
 import { submitFeedback } from '../services/feedbackService'
+import { speak, stopSpeaking } from '../services/novaSonicService'
+import { translateText } from '../services/translateService'
+import VoiceInput from './VoiceInput'
+import BookingSlots from './BookingSlots'
+import AudioSummary from './AudioSummary'
+import DocumentUpload from './DocumentUpload'
+import { LetterPreview } from './LetterPreview'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -12,11 +19,53 @@ const ThinkingSection = ({ content }: { content: string }) => (
   </details>
 )
 
-const MarkdownRenderer = ({ content }: { content: string }) => (
-  <div className="ca-markdown">
-    <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-  </div>
+// Extract S3 download URLs and render as buttons
+const DownloadButton = ({ url }: { url: string }) => (
+  <a 
+    href={url} 
+    target="_blank" 
+    rel="noopener noreferrer"
+    className="ca-download-btn"
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '8px',
+      padding: '12px 20px',
+      backgroundColor: '#1d70b8',
+      color: 'white',
+      borderRadius: '6px',
+      textDecoration: 'none',
+      fontWeight: 600,
+      margin: '10px 0',
+    }}
+  >
+    📥 Download Letter
+  </a>
 )
+
+const MarkdownRenderer = ({ content }: { content: string }) => {
+  // Check for letter preview
+  const letterMatch = content.match(/<LETTER_PREVIEW>([\s\S]*?)<\/LETTER_PREVIEW>/)
+  
+  // Check for S3 presigned URLs
+  const s3UrlRegex = /(https:\/\/[a-z0-9-]+\.s3\.[a-z0-9-]+\.amazonaws\.com\/[^\s]+)/gi
+  const urls = content.match(s3UrlRegex)
+  
+  // Remove letter preview tags from main content
+  let cleanContent = content.replace(/<LETTER_PREVIEW>[\s\S]*?<\/LETTER_PREVIEW>/g, '')
+  
+  if (urls && urls.length > 0) {
+    cleanContent = cleanContent.replace(s3UrlRegex, '[Download button below]')
+  }
+  
+  return (
+    <div className="ca-markdown">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanContent}</ReactMarkdown>
+      {urls?.map((url, i) => <DownloadButton key={i} url={url} />)}
+      {letterMatch && <LetterPreview content={letterMatch[1].trim()} />}
+    </div>
+  )
+}
 
 interface User { username: string; email?: string; userId: string; name?: string }
 
@@ -31,6 +80,7 @@ interface ChatProps {
   onMessagesUpdate?: (messages: ChatMessage[]) => void
   onNewChat?: () => void
   canStartNewChat?: boolean
+  language?: string
 }
 
 // Topics with distinct icons (shapes) for colorblind accessibility
@@ -43,14 +93,32 @@ const QUICK_TOPICS = [
   { label: 'Immigration', icon: '⬟', desc: 'Visas, status, right to work' },
 ]
 
-const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessages, refreshSessions, updateCurrentSession, onMessagesUpdate, onNewChat, canStartNewChat = true }: ChatProps) => {
+const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessages, refreshSessions, updateCurrentSession, onMessagesUpdate, onNewChat, canStartNewChat = true, language = 'en' }: ChatProps) => {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [inputMessage, setInputMessage] = useState('')
   const [loading, setLoading] = useState(false)
   const [messageFeedback, setMessageFeedback] = useState<Record<string, 'up' | 'down'>>({})
+  const [voiceEnabled, setVoiceEnabled] = useState(false)
+  const [translatedMessages, setTranslatedMessages] = useState<Record<string, string>>({})
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const lastSpokenRef = useRef<string>('')
+
+  // Translate messages when language changes
+  useEffect(() => {
+    if (language === 'en') {
+      setTranslatedMessages({});
+      return;
+    }
+    setTranslatedMessages({});
+    messages.forEach(async (msg) => {
+      if (msg.role === 'assistant') {
+        const translated = await translateText(msg.content, language);
+        setTranslatedMessages(prev => ({ ...prev, [msg.id]: translated }));
+      }
+    });
+  }, [language, messages]);
 
   useEffect(() => {
     if (currentSession) {
@@ -66,7 +134,17 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    
+    // Speak new assistant messages when voice is enabled
+    if (voiceEnabled && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1]
+      if (lastMsg.role === 'assistant' && !lastMsg.isStreaming && lastMsg.content !== lastSpokenRef.current) {
+        lastSpokenRef.current = lastMsg.content
+        const cleanText = lastMsg.content.replace(/[#*_`~\[\]()]/g, '').replace(/\n+/g, '. ').trim()
+        speak(cleanText)
+      }
+    }
+  }, [messages, voiceEnabled])
 
   const autoResize = (el: HTMLTextAreaElement) => {
     el.style.height = 'auto'
@@ -75,6 +153,7 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
 
   const handleSend = async (text: string) => {
     if (!text.trim() || loading) return
+    stopSpeaking() // Stop any ongoing speech when user sends
     setLoading(true)
     setInputMessage('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
@@ -100,7 +179,8 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
           if (last?.role === 'assistant' && !last.isStreaming && last.status === 'complete') {
             saveMessage(sessionId!, 'assistant', last.content).catch(console.error)
           }
-          onMessagesUpdate?.(newMsgs)
+          // Defer parent update to avoid setState during render
+          setTimeout(() => onMessagesUpdate?.(newMsgs), 0)
           return newMsgs
         })
       })
@@ -146,6 +226,15 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
           >
             + New Chat
           </button>
+          <button 
+            onClick={() => handleSend('Show my case notes')} 
+            disabled={loading}
+            className="ca-notes-btn"
+            aria-label="View case notes"
+            style={{ background: '#f3f2f1', color: '#0b0c0c', border: '1px solid #b1b4b6' }}
+          >
+            📋 My Notes
+          </button>
         </div>
       </div>
 
@@ -177,6 +266,12 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
             role="article"
             aria-label={`${msg.role === 'user' ? 'Your message' : 'Advisor response'}`}
           >
+            {msg.role === 'assistant' && (
+              <div className="ca-message-avatar">
+                <img src="/ally-avatar.jpeg" alt="Ally" />
+                <span className="ca-agent-name">Ally</span>
+              </div>
+            )}
             <div className="ca-message-bubble">
               {msg.thinkingContent && <ThinkingSection content={msg.thinkingContent} />}
               
@@ -187,7 +282,28 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
                   <span className="sr-only">Response in progress</span>
                 </span>
               ) : (
-                <MarkdownRenderer content={msg.content} />
+                <>
+                  <MarkdownRenderer content={msg.role === 'assistant' ? (translatedMessages[msg.id] || msg.content) : msg.content} />
+                  {language !== 'en' && msg.role === 'assistant' && !translatedMessages[msg.id] && (
+                    <span className="translating-indicator">🌐 Translating...</span>
+                  )}
+                  {/* Render booking slots if present in content */}
+                  {msg.content.includes('"type": "booking_slots"') && (() => {
+                    try {
+                      const match = msg.content.match(/\{[\s\S]*"type":\s*"booking_slots"[\s\S]*\}/)
+                      if (match) {
+                        const data = JSON.parse(match[0])
+                        return (
+                          <BookingSlots 
+                            slots={data.slots} 
+                            onSelect={(slotId, display) => handleSend(`I'd like to book the appointment for ${display}`)}
+                          />
+                        )
+                      }
+                    } catch { /* ignore parse errors */ }
+                    return null
+                  })()}
+                </>
               )}
 
               {msg.status && msg.status !== 'complete' && (
@@ -197,24 +313,41 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
                 </div>
               )}
 
+              {/* Show tool usage indicator */}
+              {msg.subagentSteps && msg.subagentSteps.length > 0 && (
+                <details className="ca-tools-used">
+                  <summary>🔧 Tools used ({msg.subagentSteps.length})</summary>
+                  <ul>
+                    {msg.subagentSteps.map((step, i) => (
+                      <li key={i}>
+                        {step.agentName.includes('kb') ? '📚' : '🔧'} {step.agentName}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+
               {msg.role === 'assistant' && !msg.isStreaming && (
-                <div className="ca-feedback" role="group" aria-label="Rate this response">
-                  <button 
-                    onClick={() => handleFeedback(msg.id, 'up')} 
-                    className={messageFeedback[msg.id] === 'up' ? 'active' : ''} 
-                    aria-label="This was helpful"
-                    aria-pressed={messageFeedback[msg.id] === 'up'}
-                  >
-                    <span aria-hidden="true">👍</span> Helpful
-                  </button>
-                  <button 
-                    onClick={() => handleFeedback(msg.id, 'down')} 
-                    className={messageFeedback[msg.id] === 'down' ? 'active' : ''} 
-                    aria-label="This was not helpful"
-                    aria-pressed={messageFeedback[msg.id] === 'down'}
-                  >
-                    <span aria-hidden="true">👎</span> Not helpful
-                  </button>
+                <div className="ca-message-actions">
+                  <AudioSummary content={msg.content} />
+                  <div className="ca-feedback" role="group" aria-label="Rate this response">
+                    <button 
+                      onClick={() => handleFeedback(msg.id, 'up')} 
+                      className={messageFeedback[msg.id] === 'up' ? 'active' : ''} 
+                      aria-label="This was helpful"
+                      aria-pressed={messageFeedback[msg.id] === 'up'}
+                    >
+                      <span aria-hidden="true">👍</span> Helpful
+                    </button>
+                    <button 
+                      onClick={() => handleFeedback(msg.id, 'down')} 
+                      className={messageFeedback[msg.id] === 'down' ? 'active' : ''} 
+                      aria-label="This was not helpful"
+                      aria-pressed={messageFeedback[msg.id] === 'down'}
+                    >
+                      <span aria-hidden="true">👎</span> Not helpful
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -224,11 +357,25 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
       </div>
 
       <div className="ca-input-area">
+        <VoiceInput
+          onTranscript={setInputMessage}
+          onSend={handleSend}
+          disabled={loading}
+          speakResponses={voiceEnabled}
+        />
         <form 
           className="ca-input-form" 
           onSubmit={(e) => { e.preventDefault(); handleSend(inputMessage) }}
           role="search"
         >
+          <DocumentUpload 
+            userId={user.userId} 
+            caseRef={currentSession?.id}
+            onUploadComplete={(files) => {
+              const fileNames = files.map(f => f.name).join(', ')
+              setInputMessage(prev => prev + (prev ? '\n' : '') + `[Attached: ${fileNames}]`)
+            }}
+          />
           <label htmlFor="message-input" className="sr-only">Type your question</label>
           <textarea
             id="message-input"
@@ -236,7 +383,7 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
             value={inputMessage}
             onChange={(e) => { setInputMessage(e.target.value); autoResize(e.target) }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(inputMessage) }}}
-            placeholder="Ask about benefits, housing, employment, consumer rights, debt..."
+            placeholder="Ask about benefits, housing, employment, consumer rights, debt... or click 🎤"
             disabled={loading}
             rows={1}
             aria-label="Type your question here"
@@ -256,6 +403,15 @@ const Chat = ({ user, currentSession, sessions = [], onSwitchSession, getMessage
             )}
           </button>
         </form>
+        <button
+          type="button"
+          onClick={() => setVoiceEnabled(!voiceEnabled)}
+          className={`ca-voice-toggle ${voiceEnabled ? 'active' : ''}`}
+          aria-label={voiceEnabled ? 'Disable voice responses' : 'Enable voice responses'}
+          title={voiceEnabled ? 'Voice responses enabled' : 'Enable voice responses'}
+        >
+          {voiceEnabled ? '🔊' : '🔇'}
+        </button>
       </div>
       
       {/* Screen reader only styles */}

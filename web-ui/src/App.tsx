@@ -6,6 +6,9 @@ import Chat from './components/Chat'
 import UserOnboarding from './components/UserOnboarding'
 import UserProfile from './components/UserProfile'
 import UKMap from './components/UKMap'
+import Dashboard from './components/Dashboard'
+import AccessibilityToggle from './components/AccessibilityToggle'
+import { LanguageSelector } from './components/LanguageSelector'
 import { useSessions } from './hooks/useSessions'
 import { getCognitoUserInfo, getDisplayName } from './services/cognitoUserService'
 import { ensureUserExists } from './services/userService'
@@ -28,12 +31,19 @@ interface User {
 const AppWithSessions = ({ user, onSignOut }: { user: User; onSignOut: () => void }) => {
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
+  const [showDashboard, setShowDashboard] = useState(false)
   const [profileLoading, setProfileLoading] = useState(true)
   const [displayName, setDisplayName] = useState<string>(user.username)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [userPostcode, setUserPostcode] = useState<string | undefined>()
   const [userRegion, setUserRegion] = useState<string | undefined>()
   const [currentMessages, setCurrentMessages] = useState<any[]>([])
+  const [language, setLanguage] = useState(() => localStorage.getItem('preferredLanguage') || 'en')
+
+  const handleLanguageChange = (lang: string) => {
+    setLanguage(lang)
+    localStorage.setItem('preferredLanguage', lang)
+  }
 
   const { sessions, currentSession, loading, switchToSession, startNewConversation, getMessages, refreshSessions, updateCurrentSession } = useSessions(user.userId)
 
@@ -81,14 +91,20 @@ const AppWithSessions = ({ user, onSignOut }: { user: User; onSignOut: () => voi
         loadProfile()
       }} />}
       <UserProfile user={user} isOpen={showProfile} onClose={() => { setShowProfile(false); loadProfile() }} />
+      
+      {showDashboard && (
+        <div className="modal-overlay" onClick={() => setShowDashboard(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowDashboard(false)}>&times;</button>
+            <Dashboard userId={user.userId} />
+          </div>
+        </div>
+      )}
 
       <header className="ca-header" role="banner">
         <div className="ca-header-brand">
           <div className="ca-logo" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
-              <circle cx="12" cy="12" r="10"/>
-              <path d="M12 16v-4M12 8h.01"/>
-            </svg>
+            <img src="/favicon.png" alt="Citizens Advice" style={{ width: '40px', height: '40px', borderRadius: '8px' }} />
           </div>
           <div>
             <h1>Citizens Advice</h1>
@@ -97,7 +113,18 @@ const AppWithSessions = ({ user, onSignOut }: { user: User; onSignOut: () => voi
         </div>
         
         <nav className="ca-header-actions" aria-label="User menu">
+          <LanguageSelector currentLang={language} onLanguageChange={handleLanguageChange} />
+          <AccessibilityToggle />
           <span className="ca-welcome">Welcome, {displayName}</span>
+          <button onClick={() => setShowDashboard(true)} className="ca-btn ca-btn-ghost" aria-label="View your dashboard">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <rect x="3" y="3" width="7" height="7" rx="1"/>
+              <rect x="14" y="3" width="7" height="7" rx="1"/>
+              <rect x="14" y="14" width="7" height="7" rx="1"/>
+              <rect x="3" y="14" width="7" height="7" rx="1"/>
+            </svg>
+            Dashboard
+          </button>
           <button onClick={() => setShowProfile(true)} className="ca-btn ca-btn-ghost" aria-label="View your profile">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M20 21V19C20 16.79 18.21 15 16 15H8C5.79 15 4 16.79 4 19V21"/>
@@ -154,6 +181,7 @@ const AppWithSessions = ({ user, onSignOut }: { user: User; onSignOut: () => voi
           onMessagesUpdate={setCurrentMessages}
           onNewChat={startNewConversation}
           canStartNewChat={!loading}
+          language={language}
         />
         </main>
       </div>

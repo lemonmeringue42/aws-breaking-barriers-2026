@@ -144,6 +144,12 @@ export const invokeAgentCore = async (
     
     if (!response.ok) {
       const errorText = await response.text();
+      
+      // Check for JWT mismatch error
+      if (response.status === 401 && errorText.includes('iss')) {
+        throw new Error('Authentication configuration mismatch. The agent needs to be redeployed with the current Cognito settings. Please contact your administrator.');
+      }
+      
       throw new Error(`HTTP ${response.status}: ${errorText}`);
     }
 
@@ -300,6 +306,14 @@ export const invokeAgentCore = async (
                   currentSubagentContent = '';
                   console.log(`Tool call starting: ${toolUse.name}`);
                   
+                  // Track tool usage
+                  subagentSteps.push({
+                    agentName: toolUse.name,
+                    input: toolUse.toolUseId || '',
+                    content: '',
+                    timestamp: Date.now()
+                  });
+                  
                   setAnswers((prevState) => {
                     const newState = [...prevState];
                     for (let i = newState.length - 1; i >= 0; i--) {
@@ -307,6 +321,7 @@ export const invokeAgentCore = async (
                         newState[i] = {
                           ...newState[i],
                           status: `Using ${toolUse.name}`,
+                          subagentSteps: [...subagentSteps],
                           currentSubagent: {
                             name: toolUse.name,
                             input: '',
@@ -382,6 +397,32 @@ export const invokeAgentCore = async (
                   // Update current tool if provided
                   if (toolUseInfo?.name && toolUseInfo.name !== currentToolUse) {
                     currentToolUse = toolUseInfo.name;
+                    
+                    // Add tool to steps when it starts
+                    const existingTool = subagentSteps.find(s => s.agentName === toolUseInfo.name);
+                    if (!existingTool) {
+                      subagentSteps.push({
+                        agentName: toolUseInfo.name,
+                        input: '',
+                        content: '',
+                        timestamp: Date.now()
+                      });
+                      
+                      setAnswers((prevState) => {
+                        const newState = [...prevState];
+                        for (let i = newState.length - 1; i >= 0; i--) {
+                          if (newState[i].isStreaming) {
+                            newState[i] = {
+                              ...newState[i],
+                              status: `Using ${toolUseInfo.name}`,
+                              subagentSteps: [...subagentSteps],
+                            };
+                            break;
+                          }
+                        }
+                        return newState;
+                      });
+                    }
                   }
                   
                   // Handle streaming text from subagent

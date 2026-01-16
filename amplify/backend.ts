@@ -2,11 +2,15 @@ import { defineBackend } from '@aws-amplify/backend';
 import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { CfnOutput } from 'aws-cdk-lib';
+import { CfnOutput, Duration } from 'aws-cdk-lib';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { UserPoolResourceServer, ResourceServerScope, UserPoolClient, OAuthScope, UserPoolDomain } from 'aws-cdk-lib/aws-cognito';
+import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
+import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -108,4 +112,36 @@ new CfnOutput(backend.stack, 'LocalBureauTableNameExport', {
 new CfnOutput(backend.stack, 'FeedbackTableNameExport', {
   value: backend.data.resources.tables['Feedback'].tableName,
   exportName: `ConciergeAgent-${deploymentId}-Data-FeedbackTableName`,
+});
+
+// Notifications Lambda
+const notificationsLambda = new NodejsFunction(backend.stack, 'NotificationsHandler', {
+  runtime: Runtime.NODEJS_18_X,
+  entry: path.join(__dirname, 'functions/notifications/handler.ts'),
+  handler: 'handler',
+  timeout: Duration.minutes(5),
+  environment: {
+    DEADLINES_TABLE: backend.data.resources.tables['Deadline'].tableName,
+    APPOINTMENTS_TABLE: backend.data.resources.tables['Appointment'].tableName,
+    USER_PROFILE_TABLE: backend.data.resources.tables['UserProfile'].tableName,
+    FROM_EMAIL: process.env.SES_FROM_EMAIL || 'noreply@example.com',
+  },
+});
+
+// Grant DynamoDB permissions
+backend.data.resources.tables['Deadline'].grantReadWriteData(notificationsLambda);
+backend.data.resources.tables['Appointment'].grantReadData(notificationsLambda);
+backend.data.resources.tables['UserProfile'].grantReadData(notificationsLambda);
+
+// Grant SES permissions
+notificationsLambda.addToRolePolicy(new PolicyStatement({
+  effect: Effect.ALLOW,
+  actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+  resources: ['*'],
+}));
+
+// Daily schedule at 9am UTC
+new Rule(backend.stack, 'NotificationsSchedule', {
+  schedule: Schedule.cron({ minute: '0', hour: '9' }),
+  targets: [new LambdaFunction(notificationsLambda)],
 });

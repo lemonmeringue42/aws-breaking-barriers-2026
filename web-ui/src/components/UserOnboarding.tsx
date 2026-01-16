@@ -88,32 +88,32 @@ const UserOnboarding = ({ user, onComplete }: UserOnboardingProps) => {
             <div className="space-y-4">
               <h3 className="font-semibold text-lg">Your Details</h3>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <label className="block text-sm font-medium text-black mb-1">Name</label>
                 <input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#004b87]/20 focus:border-[#004b87]"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#004b87]/20 focus:border-[#004b87] text-black"
                   placeholder="Your name"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Postcode</label>
+                <label className="block text-sm font-medium text-black mb-1">Postcode</label>
                 <input
                   type="text"
                   value={formData.postcode}
                   onChange={(e) => setFormData(prev => ({ ...prev, postcode: e.target.value.toUpperCase() }))}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#004b87]/20 focus:border-[#004b87]"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#004b87]/20 focus:border-[#004b87] text-black"
                   placeholder="e.g., SW1A 1AA"
                 />
                 <p className="text-xs text-gray-500 mt-1">Helps us find local services and advice</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Region</label>
+                <label className="block text-sm font-medium text-black mb-1">Region</label>
                 <select
                   value={formData.region}
                   onChange={(e) => setFormData(prev => ({ ...prev, region: e.target.value }))}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#004b87]/20 focus:border-[#004b87]"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#004b87]/20 focus:border-[#004b87] text-black"
                 >
                   <option value="">Select your region</option>
                   {regionOptions.map(region => (

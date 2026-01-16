@@ -1,13 +1,14 @@
 """
 Citizens Advice Subagent
 
-A subagent that handles citizens advice queries using Claude's knowledge.
+A subagent that handles citizens advice queries using Claude's knowledge and knowledge bases.
 """
 
 import os
 import logging
 from strands import Agent, tool
 from strands.models import BedrockModel
+from knowledge_base_tool import query_national_kb, query_local_kb
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,13 @@ IMPORTANT GUIDELINES:
 4. Include relevant links to official resources (gov.uk, citizensadvice.org.uk) when available
 5. If the user has provided their location, provide region-specific guidance where relevant
 6. If unsure about specific details, recommend the user contact their local Citizens Advice bureau
+
+KNOWLEDGE BASE TOOLS:
+You have access to two knowledge bases:
+- query_national_kb: Use for general UK-wide advice on benefits, employment, consumer rights, housing law, debt, immigration
+- query_local_kb: Use for region-specific information, local bureau details, local services
+
+ALWAYS use these tools to supplement your responses with accurate, up-to-date information.
 
 When responding:
 - Use clear, plain English avoiding jargon
@@ -86,7 +94,7 @@ async def citizens_advice_assistant(query: str, user_id: str = "", session_id: s
         agent = Agent(
             name="citizens_advice_agent",
             model=bedrock_model,
-            tools=[],
+            tools=[query_national_kb, query_local_kb],
             system_prompt=CITIZENS_ADVICE_PROMPT,
             trace_attributes={
                 "user.id": user_id,

@@ -2,250 +2,373 @@ import os
 import logging
 import boto3
 import datetime
-from strands import Agent
-from strands.models import BedrockModel
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from bedrock_agentcore.memory.integrations.strands.session_manager import (
-    AgentCoreMemorySessionManager,
-)
-from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
 import json
 import traceback
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from langchain_aws import ChatBedrock
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-# Import local modules
 from dynamodb_manager import DynamoDBManager
-from gateway_client import get_gateway_client
+from gateway_client import get_gateway_client, call_mcp_tool
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 app = BedrockAgentCoreApp()
-
-# Enable CORS for local development
 app.cors_allow_origins = ["http://localhost:3000", "http://localhost:5173"]
 app.cors_allow_methods = ["GET", "POST", "OPTIONS"]
 app.cors_allow_headers = ["Content-Type", "Authorization"]
 
-REGION = os.getenv("AWS_REGION")
+REGION = os.getenv("AWS_REGION", "us-west-2")
 MEMORY_ID = os.getenv("MEMORY_ID")
-NOTES_TABLE_NAME = os.getenv("NOTES_TABLE_NAME")
 
-logger.info(f"🗂️  Using Notes table: {NOTES_TABLE_NAME}")
-
-# DynamoDB setup
-dynamodb = boto3.resource("dynamodb", region_name=REGION)
-
-# Initialize bedrock model
-bedrock_model = BedrockModel(
+# Initialize Claude
+llm = ChatBedrock(
     model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     region_name=REGION,
-    temperature=0.1,
+    model_kwargs={"temperature": 0.1, "max_tokens": 4096}
 )
 
+# Tool definitions for Claude
+TOOLS = [
+    {
+        "name": "query_knowledge_base",
+        "description": "Search Citizens Advice knowledge base for guidance on benefits, housing, employment, consumer rights, debt, immigration. Use for any factual questions about UK law and rights.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "kb_type": {"type": "string", "enum": ["national", "local"], "description": "national for UK-wide guidance, local for region-specific info"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "save_case_notes",
+        "description": "Save case notes for the user. Call this when user provides case details, books appointment, or conversation contains important information to remember.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The case notes content to save"},
+                "category": {"type": "string", "description": "Issue category: benefits, housing, debt, employment, consumer, immigration, general"}
+            },
+            "required": ["content"]
+        }
+    },
+    {
+        "name": "get_case_notes",
+        "description": "Retrieve saved case notes for the user.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "book_appointment",
+        "description": "Book a callback appointment with an advisor. Use when user wants to speak to someone or needs human support.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phone": {"type": "string", "description": "User's phone number for callback"},
+                "slot_number": {"type": "integer", "description": "Selected slot (1-6)"},
+                "reason": {"type": "string", "description": "Brief reason for appointment"}
+            },
+            "required": ["phone", "slot_number"]
+        }
+    },
+    {
+        "name": "find_local_services",
+        "description": "Find local support services by postcode - Citizens Advice bureaus, food banks, debt advice, housing support.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "postcode": {"type": "string", "description": "UK postcode"},
+                "service_type": {"type": "string", "description": "Type: citizens_advice, food_bank, debt_advice, housing, legal_aid"}
+            },
+            "required": ["postcode"]
+        }
+    },
+    {
+        "name": "generate_letter",
+        "description": "Generate a formal letter for the user - benefit appeals, landlord complaints, debt negotiation, employer grievances.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "letter_type": {"type": "string", "enum": ["benefit_appeal", "landlord_complaint", "debt_negotiation", "employer_grievance", "consumer_complaint"]},
+                "details": {"type": "string", "description": "Key details to include in the letter"},
+                "recipient_name": {"type": "string", "description": "Name of recipient"},
+                "recipient_address": {"type": "string", "description": "Address of recipient"}
+            },
+            "required": ["letter_type", "details"]
+        }
+    }
+]
 
-def get_user_profile_data(user_id: str) -> str:
-    """Get user profile data formatted for prompts."""
+SYSTEM_PROMPT = f"""You are Ally, a Citizens Advice assistant helping UK residents. Today is {datetime.datetime.now().strftime("%B %d, %Y")}.
+
+CRISIS RESPONSE - If user mentions suicidal thoughts, domestic violence, homelessness tonight, or immediate danger:
+Immediately provide: 🆘 Emergency: 999 | Samaritans: 116 123 | Domestic Abuse: 0808 2000 247 | Shelter: 0808 800 4444
+
+YOUR TOOLS:
+- query_knowledge_base: Search for guidance on benefits, housing, employment, debt, consumer rights
+- save_case_notes: Save important case information (ALWAYS save after booking or when user shares case details)
+- get_case_notes: Retrieve user's saved notes
+- book_appointment: Book advisor callback (show slots 1-6, then book when user selects)
+- find_local_services: Find nearby support by postcode
+- generate_letter: Create formal letters (appeals, complaints, negotiations)
+
+GUIDELINES:
+- Use tools proactively - search KB for factual questions, save notes when user shares details
+- Offer booking when user is distressed, has complex issues, or asks to speak to someone
+- Use "we" and "our" when referring to Citizens Advice
+- Be empathetic, use plain language, highlight deadlines
+- Respond in the user's language
+
+BOOKING FLOW:
+1. When user wants appointment, show available slots (Mon-Fri, 9am-5pm, 30min intervals)
+2. When user picks slot + gives phone, call book_appointment
+3. After booking, ask for case details and save them with save_case_notes
+
+IMPORTANT: Always save case notes when user provides substantive information about their situation."""
+
+
+def get_user_profile(user_id: str) -> str:
+    """Get user profile data."""
     try:
         manager = DynamoDBManager(region_name=REGION)
         profile = manager.get_user_profile(user_id)
-
-        if not profile:
-            return "User profile not available"
-
-        # Extract profile information
-        profile_parts = []
-
-        # IMPORTANT: Always include userId first - this is the user's unique identifier
-        if profile.get("userId"):
-            profile_parts.append(
-                f"User ID (use this for all tool calls): {profile['userId']}"
-            )
-
-        if profile.get("name"):
-            profile_parts.append(f"Name: {profile['name']}")
-
-        if profile.get("email"):
-            profile_parts.append(f"Email: {profile['email']}")
-
-        if profile.get("address"):
-            profile_parts.append(f"Address: {profile['address']}")
-
-        if profile.get("notes"):
-            profile_parts.append(f"Notes: {profile['notes']}")
-
-        if profile.get("preferences"):
-            preferences = profile["preferences"]
-            if isinstance(preferences, str):
-                try:
-                    prefs = json.loads(preferences)
-                    profile_parts.append(f"Preferences: {json.dumps(prefs)}")
-                except json.JSONDecodeError:
-                    profile_parts.append(f"Preferences: {preferences}")
-            else:
-                profile_parts.append(f"Preferences: {preferences}")
-
-        if profile.get("onboardingCompleted"):
-            profile_parts.append(
-                f"Onboarding completed: {profile['onboardingCompleted']}"
-            )
-
-        if profile_parts:
-            profile_text = f", Profile: {'; '.join(profile_parts)}"
-        else:
-            profile_text = ", Profile: Basic user profile available"
-
-        return profile_text
-
+        if profile:
+            parts = []
+            if profile.get("name"): parts.append(f"Name: {profile['name']}")
+            if profile.get("address"): parts.append(f"Address: {profile['address']}")
+            return f"User ID: {user_id}, " + ", ".join(parts) if parts else f"User ID: {user_id}"
     except Exception as e:
-        logger.error(f"Error getting user profile: {e}")
-        return "User profile not available"
+        logger.warning(f"Could not get profile: {e}")
+    return f"User ID: {user_id}"
 
 
-def create_supervisor_agent(user_id: str, session_id: str) -> Agent:
-    """Create supervisor agent with AgentCore memory session manager."""
-    # Get user profile data
+def get_long_term_memory(user_id: str, query: str) -> str:
+    """Retrieve long-term memories."""
+    if not MEMORY_ID:
+        return ""
     try:
-        user_profile = get_user_profile_data(user_id)
-        logger.info(f"Retrieved user profile for {user_id}: {user_profile[:200]}...")
+        client = boto3.client("bedrock-agentcore", region_name=REGION)
+        memories = []
+        
+        # Use wildcard namespace to search all user memories
+        response = client.retrieve_memory_records(
+            memoryId=MEMORY_ID,
+            namespace=f"/users/{user_id}/*",
+            searchCriteria={"searchQuery": query, "topK": 10}
+        )
+        for record in response.get("memoryRecordSummaries", []):
+            content = record.get("content", {}).get("text", "")
+            if content:
+                memories.append(content)
+        
+        return "\n".join(memories) if memories else ""
     except Exception as e:
-        logger.warning(f"Could not retrieve user profile for {user_id}: {e}")
-        user_profile = "User profile not available"
+        logger.debug(f"Memory retrieval failed: {e}")
+        return ""
 
-    # Simplified prompt - direct assistance without routing
-    system_prompt = f"""You are a Citizens Advice assistant helping UK residents with practical guidance on everyday issues.
-Today's date is {datetime.datetime.now().strftime("%B %d, %Y")}.
 
-CRISIS ESCALATION - CRITICAL:
-If the user mentions ANY of the following, immediately provide crisis support contacts:
-- Suicidal thoughts or self-harm
-- Severe mental health crisis
-- Domestic violence or abuse (current or immediate threat)
-- Homelessness with nowhere to stay tonight
-- No money for food/heating and vulnerable (elderly, children, disabled)
-- Immediate eviction (bailiffs coming today/tomorrow)
-
-CRISIS RESPONSE FORMAT:
-"I'm concerned about your safety and wellbeing. Please contact these services immediately:
-
-🆘 EMERGENCY: If you're in immediate danger, call 999
-
-Mental Health Crisis:
-- Samaritans: 116 123 (24/7, free)
-- Crisis text line: Text SHOUT to 85258
-
-Domestic Abuse:
-- National Domestic Abuse Helpline: 0808 2000 247 (24/7)
-
-Homelessness:
-- Shelter Emergency Helpline: 0808 800 4444
-- Local council housing emergency: [advise to call their local council]
-
-I can still provide guidance, but please reach out to these services for immediate support."
-
-LANGUAGE SUPPORT:
-- Respond in the same language the user writes in (English, Spanish, French, Polish, etc.)
-- If the user writes in Spanish, respond completely in Spanish
-- If the user writes in French, respond completely in French
-- Maintain the same language throughout the conversation unless the user switches
-
-Your primary responsibilities include:
-1. Providing guidance on benefits and financial support (Universal Credit, PIP, Housing Benefit)
-2. Helping with housing and tenancy questions (rights, eviction, repairs)
-3. Advising on employment rights and workplace issues (redundancy, discrimination, pay)
-4. Explaining consumer rights and debt management (refunds, faulty goods, priority debts)
-5. Guiding users on immigration and legal matters
-
-IMPORTANT GUIDELINES:
-1. Always provide accurate, impartial advice based on current UK law and regulations
-2. Be empathetic and non-judgmental - users may be in difficult situations
-3. Clearly distinguish between general guidance and situations requiring professional legal advice
-4. Include relevant links to official resources (gov.uk, citizensadvice.org.uk) when available
-5. If unsure about specific details, recommend the user contact their local Citizens Advice bureau
-6. ALWAYS escalate crisis situations to human support services
-
-When responding:
-- Use clear, plain language avoiding jargon (in whatever language the user is using)
-- Break down complex processes into simple steps
-- Highlight important deadlines or time limits (e.g., tribunal appeal deadlines)
-- Mention any free services or support available
-- DO NOT provide specific legal advice - guide users to appropriate professionals when needed
-- Provide practical, actionable guidance based on UK law and Citizens Advice principles
-
-USER PROFILE:
-{user_profile}
-"""
-
-    # Configure AgentCore Memory integration
-    agentcore_memory_config = AgentCoreMemoryConfig(
-        memory_id=MEMORY_ID, session_id=session_id, actor_id=f"supervisor-{user_id}"
-    )
-
-    session_manager = AgentCoreMemorySessionManager(
-        agentcore_memory_config=agentcore_memory_config, region_name=REGION
-    )
-
-    logger.info("Creating supervisor agent with session manager...")
-
-    # Create agent WITHOUT tools first to test
-    agent = Agent(
-        name="supervisor_agent",
-        system_prompt=system_prompt,
-        tools=[],  # No tools for now
-        model=bedrock_model,
-        session_manager=session_manager,
-        trace_attributes={
-            "user.id": user_id,
-            "session.id": session_id,
-        },
-    )
-    logger.info("✅ Agent created (no tools)")
-
-    logger.info("Supervisor agent created successfully with session manager")
-    return agent
+def execute_tool(tool_name: str, tool_input: dict, user_id: str, session_id: str) -> str:
+    """Execute a tool and return result."""
+    logger.info(f"🔧 Executing tool: {tool_name} with input: {tool_input}")
+    
+    try:
+        if tool_name == "query_knowledge_base":
+            from knowledge_base_tool import query_national_kb, query_local_kb
+            kb_type = tool_input.get("kb_type", "national")
+            query = tool_input.get("query", "")
+            if kb_type == "local":
+                return query_local_kb(query) or "No local results found."
+            return query_national_kb(query) or "No results found."
+        
+        elif tool_name == "save_case_notes":
+            content = tool_input.get("content", "")
+            category = tool_input.get("category", "general")
+            result = call_mcp_tool("create_note", {
+                "user_id": user_id,
+                "content": content,
+                "category": category,
+                "action_required": False
+            })
+            return f"Case notes saved successfully." if "error" not in result.lower() else result
+        
+        elif tool_name == "get_case_notes":
+            result = call_mcp_tool("get_notes", {"user_id": user_id})
+            return result if result else "No case notes found."
+        
+        elif tool_name == "book_appointment":
+            from datetime import datetime, timedelta
+            import uuid
+            
+            phone = tool_input.get("phone", "")
+            slot_num = tool_input.get("slot_number", 1)
+            reason = tool_input.get("reason", "General advice")
+            
+            # Generate slot display
+            slots = []
+            now = datetime.now()
+            for day_offset in range(1, 6):
+                date = now + timedelta(days=day_offset)
+                if date.weekday() >= 5: continue
+                for hour in range(9, 17):
+                    for minute in [0, 30]:
+                        slot_time = date.replace(hour=hour, minute=minute, second=0)
+                        slots.append(slot_time.strftime("%A %d %B at %H:%M"))
+            
+            slot_display = slots[slot_num - 1] if 1 <= slot_num <= len(slots) else slots[0]
+            ref = f"CA-{uuid.uuid4().hex[:6].upper()}"
+            
+            # Save booking as case note
+            call_mcp_tool("create_note", {
+                "user_id": user_id,
+                "content": f"BOOKING: {ref}\nAppointment: {slot_display}\nPhone: {phone}\nReason: {reason}",
+                "category": "booking",
+                "action_required": True
+            })
+            
+            return f"✅ Appointment booked!\nReference: {ref}\nTime: {slot_display}\nWe'll call: {phone}"
+        
+        elif tool_name == "find_local_services":
+            from local_services_tool import find_local_services
+            postcode = tool_input.get("postcode", "")
+            service_type = tool_input.get("service_type", "citizens_advice")
+            return find_local_services(postcode, service_type) or "No services found for that postcode."
+        
+        elif tool_name == "generate_letter":
+            from document_generator_tool import generate_letter
+            return generate_letter(
+                letter_type=tool_input.get("letter_type", "general"),
+                user_id=user_id,
+                details=tool_input.get("details", ""),
+                recipient_name=tool_input.get("recipient_name", ""),
+                recipient_address=tool_input.get("recipient_address", "")
+            )
+        
+        else:
+            return f"Unknown tool: {tool_name}"
+            
+    except Exception as e:
+        logger.error(f"Tool execution error: {e}")
+        return f"Tool error: {str(e)}"
 
 
 @app.entrypoint
 async def agent_stream(payload):
-    """Main entrypoint for the supervisor agent with session manager."""
-    user_query = payload.get("prompt")
-    user_id = payload.get("user_id")
-    session_id = payload.get("session_id")
+    """Main entrypoint - simple tool-calling agent."""
+    user_query = payload.get("prompt", "")
+    user_id = payload.get("user_id", "")
+    session_id = payload.get("session_id", "")
 
-    logger.info(f"=== AGENT ENTRYPOINT CALLED ===")
-    logger.info(f"Payload: {payload}")
+    logger.info(f"=== AGENT REQUEST ===")
+    logger.info(f"Query: {user_query[:100]}...")
 
     if not all([user_query, user_id, session_id]):
-        error_msg = "Missing required fields: prompt, user_id, or session_id"
-        logger.error(error_msg)
-        yield {"status": "error", "error": error_msg}
+        yield {"status": "error", "error": "Missing required fields"}
         return
 
     try:
-        logger.info(f"Starting streaming invocation for user: {user_id}, session: {session_id}")
-        logger.info(f"Query: {user_query}")
-
-        agent = create_supervisor_agent(user_id, session_id)
-        logger.info("Agent created successfully, starting stream...")
-
-        # Use the agent's stream_async method for true token-level streaming
-        event_count = 0
-        async for event in agent.stream_async(user_query):
-            event_count += 1
-            if event_count <= 3:  # Log first few events
-                logger.info(f"Event {event_count}: {type(event)} - {str(event)[:200]}")
-            yield event
+        # Build context
+        user_profile = get_user_profile(user_id)
+        memory = get_long_term_memory(user_id, user_query)
         
-        logger.info(f"Streaming completed. Total events: {event_count}")
-
+        context = f"USER: {user_profile}"
+        if memory:
+            context += f"\n\nPREVIOUS CONTEXT:\n{memory}"
+        
+        messages = [
+            {"role": "user", "content": f"{context}\n\nUser message: {user_query}"}
+        ]
+        
+        tools_used = []
+        max_iterations = 10
+        
+        for iteration in range(max_iterations):
+            logger.info(f"Iteration {iteration + 1}")
+            
+            # Call Claude with tools
+            response = llm.invoke(
+                [SystemMessage(content=SYSTEM_PROMPT)] + [
+                    HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
+                    for m in messages
+                ],
+                tools=TOOLS
+            )
+            
+            # Check for tool calls
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_input = tool_call["args"]
+                    
+                    tools_used.append(tool_name)
+                    
+                    # Emit tool use event
+                    yield {
+                        "event": {
+                            "contentBlockStart": {
+                                "start": {
+                                    "toolUse": {
+                                        "name": tool_name,
+                                        "toolUseId": tool_call.get("id", tool_name)
+                                    }
+                                },
+                                "contentBlockIndex": len(tools_used)
+                            }
+                        }
+                    }
+                    
+                    # Execute tool
+                    result = execute_tool(tool_name, tool_input, user_id, session_id)
+                    logger.info(f"Tool result: {result[:200]}...")
+                    
+                    # Add tool result to messages
+                    messages.append({"role": "assistant", "content": f"[Called {tool_name}]"})
+                    messages.append({"role": "user", "content": f"Tool result for {tool_name}: {result}"})
+                
+                continue  # Loop to let Claude process tool results
+            
+            # No tool calls - stream final response
+            final_content = response.content if isinstance(response.content, str) else str(response.content)
+            
+            # Emit message start
+            yield {"event": {"messageStart": {"role": "assistant"}}}
+            
+            # Stream content in chunks
+            chunk_size = 20
+            for i in range(0, len(final_content), chunk_size):
+                yield {
+                    "event": {
+                        "contentBlockDelta": {
+                            "delta": {"text": final_content[i:i+chunk_size]},
+                            "contentBlockIndex": 0
+                        }
+                    }
+                }
+            
+            # Emit message stop
+            yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+            
+            # Emit tool results for UI
+            for tool_name in tools_used:
+                yield {
+                    "tool_stream_event": {
+                        "tool_use": {"name": tool_name},
+                        "data": {"result": "completed"}
+                    }
+                }
+            
+            break  # Done
+            
     except Exception as e:
-        logger.error(f"Error in agent_stream: {e}")
+        logger.error(f"Agent error: {e}")
         logger.error(traceback.format_exc())
-        # Send error as text so user sees it
-        yield {"event": {"contentBlockDelta": {"delta": {"text": f"Error: {str(e)}"}}}}
-        yield {"status": "error", "error": str(e)}
+        yield {"event": {"contentBlockDelta": {"delta": {"text": f"I encountered an error. Please try again."}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
 
 if __name__ == "__main__":

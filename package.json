@@ -9,13 +9,12 @@
     "deploy:amplify": "npx ampx sandbox --once --identifier $(node -p \"require('./deployment-config.json').deploymentId\")",
     "deploy:mcp": "find concierge_agent/mcp_* -name Dockerfile -exec touch {} \\; && cd infrastructure/mcp-servers && npm install && cdk deploy --all --require-approval never",
     "deploy:agent": "cd infrastructure/agent-stack && npm install && cdk deploy --require-approval never && cd ../.. && ./scripts/sync-gateway.sh",
-    "deploy:frontend": "cd infrastructure/frontend-stack && npm install && cdk deploy --require-approval never && cd ../.. && ./scripts/deploy-frontend.sh",
-    "deploy": "npm run deploy:amplify && npm run deploy:mcp && npm run deploy:agent",
+    "deploy:frontend": "./scripts/deploy-frontend.sh",
+    "deploy": "npm run deploy:amplify && npm run deploy:mcp && npm run deploy:agent && npm run deploy:frontend",
     "clean:amplify": "npx ampx sandbox delete",
     "clean:mcp": "cd infrastructure/mcp-servers && cdk destroy",
     "clean:agent": "cd infrastructure/agent-stack && cdk destroy",
-    "clean:frontend": "cd infrastructure/frontend-stack && cdk destroy",
-    "clean": "npm run clean:frontend && npm run clean:agent && npm run clean:mcp && npm run clean:amplify"
+    "clean": "npm run clean:agent && npm run clean:mcp && npm run clean:amplify"
   },
   "workspaces": [
     "web-ui",

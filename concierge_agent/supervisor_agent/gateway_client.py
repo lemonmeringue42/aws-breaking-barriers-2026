@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 _token_cache: Optional[str] = None
 _token_expiry: Optional[datetime] = None
 
+# MCP client cache
+_mcp_client: Optional[MCPClient] = None
+
+
+def call_mcp_tool(tool_name: str, args: dict) -> str:
+    """Call an MCP tool through the gateway."""
+    global _mcp_client
+    try:
+        if _mcp_client is None:
+            _mcp_client = get_gateway_client(r"^notestools___", prefix="notes")
+        
+        if not _mcp_client:
+            return "MCP client not available"
+        
+        tools = _mcp_client.list_tools_sync()
+        for tool in tools:
+            if tool_name in tool.name:
+                result = _mcp_client.call_tool_sync(tool.name, args)
+                return str(result)
+        return f"Tool {tool_name} not found"
+    except Exception as e:
+        logger.error(f"MCP tool call failed: {e}")
+        return f"Error: {e}"
+
 
 def get_ssm_parameter(parameter_name: str, region: str) -> str:
     """
@@ -131,7 +155,7 @@ def get_gateway_client(tool_filter_pattern: str, prefix: str = "gateway") -> MCP
     deployment_id = os.getenv("DEPLOYMENT_ID", "default")
 
     gateway_url = get_ssm_parameter(
-        f"/concierge-agent/{deployment_id}/gateway-url", region
+        f"/citizens-advice-agent/{deployment_id}/gateway-url", region
     )
     access_token = get_gateway_access_token()
 
